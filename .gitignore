@@ -1,0 +1,27 @@
+# Tudo o que os scripts geram. Para recriar, siga os passos do README.md.
+
+# scripts/filtrar_go.py -> go_cases.json, go_cases.csv, piloto.json
+dados/
+
+# scripts/gerar_prompts.py -> <CVE>.txt
+prompts/
+
+# Respostas dos modelos aos prompts (respostas/<modelo>/<CVE>.md ou .patch).
+# Nenhum script as cria: são coladas à mão a partir do chat da LLM.
+# Ficam fora do git porque são material de execução, como os resultados.
+# Uma nova chamada ao modelo não devolve o mesmo texto, então guarde uma cópia
+# fora do repositório se precisar reproduzir uma rodada.
+respostas/
+
+# scripts/montar_patches.py -> patches_<modelo>.json
+patches/
+
+# python3 -m pipeline -> uma pasta por execução
+resultados/
+
+# Teste preliminar (seleção dos 10 casos mais leves).
+scripts/selecionar_casos.py
+
+# Python
+__pycache__/
+*.pyc
