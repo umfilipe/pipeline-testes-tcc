@@ -57,7 +57,7 @@ O pacote `pipeline/` está dividido assim:
 | `testes_go.py`  | lê a saída de `go test -json` e compara as versões                  |
 | `sast.py`       | roda `gosec` e Semgrep, encontra e formata os achados novos (com a CWE) |
 | `conteiner.py`  | executa comandos no host e dentro do container                      |
-| `ambiente.py`   | prepara e isola o container, lê os testes do `unit_test.sh`          |
+| `ambiente.py`   | prepara e isola o container, salva o código da PoC, lê os testes do `unit_test.sh` |
 | `relatorio.py`  | grava o `resumo.csv`                                                |
 | `config.py`     | timeouts e configuração padrão do Semgrep                           |
 
@@ -201,6 +201,7 @@ resumo.csv                 uma linha por caso (status e contagens)
 <CVE>/testes_patch.json    resultado de cada teste na versão corrigida
 <CVE>/testes_patch.log     saída completa do go test na versão corrigida
 <CVE>/poc.log              saída da PoC
+<CVE>/poc/                 código da PoC: fix-run.sh (script que a roda), files/ (arquivos que ele copia para o repositório) e poc_spec.json
 <CVE>/achados_novos.log    achados novos do gosec/Semgrep: CWE, arquivo, linha e código (só se houver)
 <CVE>/src_vulneravel/      cópia do código analisado pelo Semgrep (antes)
 <CVE>/src_patch/           cópia do código analisado pelo Semgrep (depois)

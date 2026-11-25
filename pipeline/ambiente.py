@@ -2,6 +2,7 @@
 
 Cada imagem do PatchEval traz, em /workspace:
   fix-run.sh    -> aplica /workspace/fix.patch e roda a PoC (sai com 0 se o ataque falhar);
+  poc/          -> código da PoC (testes Go que o fix-run.sh copia para o repositório);
   unit_test.sh  -> aplica o patch e roda os testes unitários escolhidos pelos autores
                    do benchmark (`go test -run '^(TesteA|TesteB)$' <pacote>`).
 
@@ -12,6 +13,7 @@ comportamento vulnerável).
 """
 import re
 import shlex
+import shutil
 
 from .config import GOPROXY_PREPARACAO, TIMEOUT_TESTES
 from .conteiner import dexec, sh
@@ -56,6 +58,25 @@ def isolar(nome):
     _, depois = sh(["docker", "inspect", "-f",
                     "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}", nome])
     return not depois.strip()
+
+
+def salvar_poc(nome, destino):
+    """Copia do container para `destino`, no host, o código da PoC e o script que a roda.
+
+    `destino` fica com o fix-run.sh e o conteúdo de /workspace/poc. Devolve uma
+    mensagem com o que não pôde ser copiado, ou None se deu tudo certo.
+    """
+    # começa de uma pasta limpa para não misturar com execuções anteriores
+    if destino.exists():
+        shutil.rmtree(destino)
+    destino.mkdir(parents=True)
+    erros = []
+    # "poc/." copia o conteúdo da pasta, e não a pasta em si
+    for origem in ("/workspace/fix-run.sh", "/workspace/poc/."):
+        cod, out = sh(["docker", "cp", f"{nome}:{origem}", str(destino)])
+        if cod != 0:
+            erros.append(f"{origem}: {out.strip()}")
+    return "; ".join(erros) or None
 
 
 def alvo_dos_testes(nome, pacotes_padrao):

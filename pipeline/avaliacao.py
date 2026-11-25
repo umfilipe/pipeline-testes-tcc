@@ -22,7 +22,7 @@ import os
 import shlex
 import time
 
-from .ambiente import alvo_dos_testes, baixar_dependencias, isolar, raiz_repo
+from .ambiente import alvo_dos_testes, baixar_dependencias, isolar, raiz_repo, salvar_poc
 from .config import TIMEOUT_POC, TIMEOUT_TESTES
 from .conteiner import dexec, sh
 from .patches import montar_patch_por_funcoes
@@ -35,7 +35,7 @@ def avaliar(caso, item, args, pasta):
 
     `args` são os argumentos da linha de comando (usa `args.gosec` e
     `args.semgrep_config`). Os artefatos intermediários (testes, patch, log da
-    PoC, cópias do código) são gravados em `pasta`.
+    PoC, código da PoC, cópias do código) são gravados em `pasta`.
     """
     cve = caso["cve_id"]
     # nome único do container, para não colidir com execuções anteriores
@@ -60,6 +60,12 @@ def avaliar(caso, item, args, pasta):
         if not isolar(nome):
             r["status"], r["erro"] = "erro_ambiente", "não foi possível tirar o container da rede"
             return r
+
+        # código da PoC, para a revisão manual; salvo aqui para existir mesmo se o
+        # patch não aplicar ou não compilar. Falhar na cópia não afeta o veredito
+        erro = salvar_poc(nome, pasta / "poc")
+        if erro:
+            r["aviso_poc"] = f"código da PoC não foi salvo por completo ({erro})"
 
         # pacotes Go que contêm as funções vulneráveis: build e SAST rodam neles
         arquivos = sorted({f["file_path"] for f in caso["vul_func"]})
