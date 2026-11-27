@@ -15,12 +15,12 @@ Para cada patch, o pipeline responde a três perguntas:
 ## Estrutura
 
 ```
-├── scripts/      preparação: filtrar casos, gerar prompts, montar patches
+├── scripts/      preparação (filtrar e sortear casos, gerar prompts, montar patches) e limpeza das imagens
 ├── pipeline/     o pipeline de avaliação (pacote Python)
 ├── dataset/      patcheval_verified.json, o dataset original do PatchEval
-├── dados/        casos em Go do PatchEval (go_cases.*) e o piloto (piloto.json)  [gerado]
+├── dados/        casos em Go (go_cases.*), piloto (piloto.json) e casos sorteados (casos.*)  [gerado]
 ├── config/       regras do Semgrep para Go (cópia local, para reprodutibilidade)
-├── prompts/      um prompt por CVE, para colar no chat do modelo                 [gerado]
+├── prompts/      um prompt por CVE, para enviar ao modelo                        [gerado]
 ├── respostas/    respostas dos modelos, uma pasta por modelo (respostas/<modelo>/<CVE>.md)  [fora do git]
 ├── patches/      patches no formato lido pelo pipeline (patches_<modelo>.json)  [gerado]
 └── resultados/   saída do pipeline, uma pasta por execução                       [gerado]
@@ -29,8 +29,8 @@ Para cada patch, o pipeline responde a três perguntas:
 As pastas marcadas com `[gerado]` são criadas pelos scripts e ficam fora do git
 (ver `.gitignore`). Para recriá-las, siga os passos de [Como rodar](#como-rodar).
 A pasta `respostas/` também fica fora do git, mas por outro motivo: o script só
-cria os arquivos vazios, e as respostas são coladas à mão a partir do chat do
-modelo (passo 3). Como os resultados, elas são material de cada rodada, não código. Uma nova chamada ao
+cria os arquivos vazios, e as respostas são obtidas via Claude Code e Antigravity
+CLI e coladas neles (passo 4). Como os resultados, elas são material de cada rodada, não código. Uma nova chamada ao
 modelo não devolve o mesmo texto. Para reproduzir uma rodada, guarde uma
 cópia das respostas fora do repositório (por exemplo, junto com os resultados).
 
@@ -44,8 +44,7 @@ curl -fL -o dataset/patcheval_verified.json \
     https://raw.githubusercontent.com/bytedance/PatchEval/main/patcheval/datasets/patcheval_verified.json
 ```
 
-Se ele mudar, os casos selecionados em `dados/` podem mudar também. Anote o
-commit usado no TCC.
+Se ele mudar, os casos selecionados em `dados/` podem mudar também.
 
 O pacote `pipeline/` está dividido assim:
 
@@ -86,40 +85,92 @@ python3 scripts/filtrar_go.py dataset/patcheval_verified.json
 
 O script grava `dados/go_cases.json`, `dados/go_cases.csv` e `dados/piloto.json`
 (os 5 casos do piloto estão na lista `PILOTO`, no início do script) e mostra os
-`docker pull` das imagens do piloto. Baixe as imagens antes de rodar o pipeline.
+`docker pull` das imagens do piloto. O piloto serve para testar o pipeline; os
+casos do TCC saem do sorteio do passo 2.
 
-### 2. Gerar os prompts e os arquivos de resposta
+### 2. Sortear os casos do TCC
 
 ```
-python3 scripts/gerar_prompts.py dados/piloto.json prompts/ --modelos claude-opus gemini-neon
+python3 scripts/selecionar_casos.py --simular --saida /tmp/teste.json   # confere as regras, sem Docker
+python3 scripts/selecionar_casos.py                                    # seleção real, semente nova
+python3 scripts/selecionar_casos.py --semente 1234                     # repete um sorteio
+python3 scripts/selecionar_casos.py --semente 1234 --excluir CVE-AAAA-NNNN   # troca um caso
 ```
 
-Gera `prompts/<CVE>.txt` em português, com a descrição do CVE, as CWEs, o código
-vulnerável e o formato de resposta esperado (blocos ` ```go `). No fim, a seção
-"Entrega" pede que o modelo crie um arquivo `<CVE>.txt` com a resposta completa,
-o que evita perder as marcações ` ```go ` ao copiar do chat. Para cada nome em
+O script faz um sorteio estratificado por família de CWE, com `--por-familia`
+casos (padrão 6) em cada uma das 5 famílias. As regras, na ordem:
+
+1. **Família:** cada caso entra na primeira família que contém alguma CWE dele:
+   "Caminhos e arquivos" (CWE-22, 73), "Injeção" (CWE-77, 78, 89, 94),
+   "Controle de acesso" (CWE-285, 862, 863, 639, 250, 269, 284, 276, 732),
+   "Redirecionamento e requisições" (CWE-601, 918) ou "Outras".
+2. **Viabilidade:** só são elegíveis os casos com as funções vulneráveis em um
+   único arquivo, no máximo 2 funções e no máximo 150 linhas vulneráveis.
+3. **Sorteio:** em cada família, os elegíveis são ordenados por `cve_id` e
+   embaralhados com a semente.
+4. **Ordem das famílias:** da que tem menos repositórios elegíveis distintos para
+   a que tem mais.
+5. **Escolha:** na ordem sorteada, pula o caso cujo repositório já está na
+   amostra e descarta o que não tem nenhum teste passando na versão vulnerável,
+   sem rede. Os demais são escolhidos até completar a família.
+6. **Vagas que sobrarem:** vão para os elegíveis ainda não avaliados das outras
+   famílias, em um novo sorteio com a mesma semente.
+
+Sem `--semente`, o script gera uma e a mostra no terminal. **Anote a semente**:
+com ela e o mesmo `go_cases.json`, a seleção se repete. Se uma imagem não puder
+ser baixada, o script para em vez de pular o caso, porque pular mudaria a amostra.
+
+A seleção real baixa a imagem de cada candidato (cerca de 2 GB cada) e roda os
+testes dele; as imagens dos casos descartados são removidas. Use `--simular`
+para conferir as regras sem Docker: nesse modo, todo candidato conta como tendo
+testes.
+
+O `--excluir` serve para trocar um caso que falhar no teste de sanidade com a
+correção oficial (passo 6). Rode de novo com a **mesma semente** e o CVE em
+`--excluir`: entra o próximo da ordem sorteada da mesma família, e os casos que
+vinham antes dele continuam os mesmos.
+
+Saídas (com o padrão `--saida dados/casos.json`):
+
+| Arquivo | Conteúdo |
+|---|---|
+| `dados/casos.json` | casos escolhidos, no formato do `go_cases.json`, com o campo `sorteio` (semente, família e posição) |
+| `dados/casos.csv` | resumo dos casos escolhidos |
+| `dados/casos_selecao.json` | registro da seleção: semente, parâmetros, contagens por família e o resultado de cada candidato avaliado. |
+
+### 3. Gerar os prompts e os arquivos de resposta
+
+```
+python3 scripts/gerar_prompts.py dados/casos.json prompts/ --modelos claude-opus gemini-neon
+```
+
+Gera `prompts/<CVE>.txt`, com a descrição da falha, o código
+vulnerável e o formato de resposta esperado (blocos ` ```go `). O prompt **não**
+traz o identificador do CVE nem as CWEs: com eles, o modelo poderia reconhecer a
+vulnerabilidade ou lembrar a correção publicada, em vez de analisar o código. O
+`<CVE>` aparece só no nome do arquivo, que não é enviado ao modelo. No fim, a seção
+"Entrega" pede que o modelo crie um arquivo `resposta.txt` com a resposta completa,
+o que evita perder as marcações ` ```go ` ao copiar a resposta. Para cada nome em
 `--modelos`, cria também `respostas/<modelo>/<CVE>.md` **vazio**, um por caso.
 Arquivos de resposta que já existem não são tocados, então rodar o script de novo
 não apaga respostas já coladas.
 
-### 3. Colar as respostas do modelo
+### 4. Colar as respostas do modelo
 
-As respostas são obtidas à mão, no chat de cada modelo (claude.ai, gemini.google.com etc.):
+As respostas são obtidas usando o Claude Code e o Antigravity CLI:
 
 1. Abra uma **conversa nova** para cada caso, para uma resposta não influenciar a outra.
 2. Cole o conteúdo de `prompts/<CVE>.txt` e envie.
-3. Copie o conteúdo do arquivo `<CVE>.txt` que o modelo criou e cole em
+3. Copie o conteúdo do arquivo `resposta.txt` que o modelo criou e cole em
    `respostas/<modelo>/<CVE>.md`. Se o modelo não criar o arquivo, copie a
-   resposta inteira com o botão de copiar do chat, que mantém os blocos ` ```go `.
+   resposta inteira mantendo os blocos ` ```go `.
 
-Anote o modelo e a configuração usados (por exemplo, o nível de raciocínio) para
-descrever na metodologia. Também é possível salvar um diff pronto como
-`respostas/<modelo>/<CVE>.patch`.
+O modelo e a configuração usados são anotados (por exemplo, o nível de raciocínio).
 
-### 4. Montar o arquivo de patches
+### 5. Montar o arquivo de patches
 
 ```
-python3 scripts/montar_patches.py dados/piloto.json respostas/claude-opus patches/patches_claude-opus.json
+python3 scripts/montar_patches.py dados/casos.json respostas/claude-opus patches/patches_claude-opus.json
 ```
 
 O script extrai os blocos de código Go de cada resposta e avisa quando falta uma
@@ -130,21 +181,29 @@ blocos idênticos ao código vulnerável (alguns modelos citam o original antes 
 correção) e blocos que não são declarações completas (`func`, `var`, `const` ou
 `type`), como uma linha solta citada na explicação.
 
-### 5. Rodar o pipeline
+Dos blocos que sobram, cada função vulnerável recebe o **último bloco que a
+declara** (mesmo nome e mesmo tipo de receptor), junto com as auxiliares que
+estiverem nele, como o prompt pede. Os outros blocos ficam de fora: é comum o
+modelo citar na análise uma struct que já existe no arquivo, e ela viraria uma
+redeclaração no patch (`nao_compila`). Se alguma função não for encontrada pelo
+nome, vale a regra por posição: com uma função vulnerável, todos os blocos
+juntos; com mais, um bloco por função, na ordem.
+
+### 6. Rodar o pipeline
 
 Primeiro, faça o **teste de sanidade com a correção oficial**. A PoC deve ser
 bloqueada em todos os casos. Se não for, o problema está no pipeline ou no caso,
 e não no modelo:
 
 ```
-python3 -m pipeline --casos dados/piloto.json --oficial --saida resultados/oficial \
+python3 -m pipeline --casos dados/casos.json --oficial --saida resultados/oficial \
     --semgrep-config config/regras_semgrep_golang.yaml
 ```
 
 Depois, avalie os patches do modelo:
 
 ```
-python3 -m pipeline --casos dados/piloto.json --patches patches/patches_claude-opus.json \
+python3 -m pipeline --casos dados/casos.json --patches patches/patches_claude-opus.json \
     --saida resultados/claude-opus --semgrep-config config/regras_semgrep_golang.yaml
 ```
 
@@ -157,6 +216,23 @@ Opções úteis:
 - O Semgrep roda sempre com `--no-git-ignore`. O código analisado é copiado para
   `resultados/`, que está no `.gitignore`, e sem essa opção o Semgrep pularia
   todos os arquivos sem avisar.
+
+### 7. Liberar o espaço das imagens
+
+Cada imagem do PatchEval ocupa cerca de 1,5 a 2,5 GB. Depois de terminar
+**todas** as execuções que usam os casos (correção oficial e cada modelo),
+remova as imagens:
+
+```
+python3 scripts/limpar_imagens.py dados/casos.json --simular   # mostra o que seria removido
+python3 scripts/limpar_imagens.py dados/casos.json             # remove as imagens destes casos
+python3 scripts/limpar_imagens.py --todas                       # remove todas as imagens do PatchEval
+```
+
+O script só remove imagens `ghcr.io/patcheval-cve/...` e containers parados do
+pipeline (`tcc_*`) criados a partir delas. Outras imagens e containers do Docker
+ficam intactos, e uma imagem com container em execução é pulada. Para rodar o
+pipeline de novo nesses casos, as imagens são baixadas outra vez.
 
 ## O que o pipeline faz em cada caso
 
@@ -282,3 +358,56 @@ funcional é medida pelos testes, como na tabela anterior.
 
 Registre a classificação de cada achado na análise manual. Assim também dá para
 medir a precisão do alarme: quantos achados eram problemas reais.
+
+## Resultados da rodada piloto (2026-11-26)
+
+Primeira rodada com o critério de seleção do TCC (passo 2) e com os prompts sem
+o identificador do CVE e sem as CWEs (passo 3).
+
+**Configuração**
+
+| Item | Valor |
+|---|---|
+| Seleção | `scripts/selecionar_casos.py --por-familia 1` (1 caso por família, 5 no total), semente `3037737912` |
+| Modelos | Claude Opus 5.5 (`claude-opus`) e Gemini Argon (`gemini-argon`), os dois com **effort high** |
+| Coleta | via Claude Code e Antigravity CLI, uma conversa nova por caso |
+| Regras do Semgrep | `config/regras_semgrep_golang.yaml` |
+
+Na seleção, dois candidatos foram descartados por não terem nenhum teste
+passando na versão vulnerável: CVE-2023-24623 (1º de "Redirecionamento e
+requisições") e CVE-2025-29778 (1º de "Controle de acesso"). O registro completo
+está em `dados/casos_selecao.json`.
+
+**Resultado** (`resultados/<execução>/resumo.csv`)
+
+| Família | CVE | Projeto | Oficial | Claude Opus 5.5 | Gemini Argon |
+|---|---|---|---|---|---|
+| Caminhos e arquivos | CVE-2020-29529 | hashicorp/go-slug | `aprovado_automatico` | `aprovado_automatico` | `aprovado_automatico` |
+| Injeção | CVE-2024-27289 | jackc/pgx | `aprovado_automatico` | `aprovado_automatico` | `aprovado_automatico` |
+| Controle de acesso | CVE-2025-24976 | distribution/distribution | `aprovado_automatico` | `aprovado_automatico` | `regressao_funcional` |
+| Redirecionamento e requisições | CVE-2020-4037 | oauth2-proxy/oauth2-proxy | `aprovado_automatico` | `aprovado_automatico` | `poc_nao_bloqueada` |
+| Outras | CVE-2025-48374 | project-zot/zot | `aprovado_automatico` | `aprovado_automatico` | `aprovado_automatico` |
+| **Aprovados automaticamente** | | | **5/5** | **5/5** | **3/5** |
+
+Nenhum caso teve achado novo de `gosec` ou Semgrep, nem corridas novas. A
+correção oficial (teste de sanidade) passou nos 5 casos, então nenhum caso
+precisou ser trocado com `--excluir`.
+
+**Falhas do Gemini Argon**
+
+- **CVE-2020-4037 (`poc_nao_bloqueada`):** o patch só troca `?` por `*` na regex
+  `invalidRedirectRegex`, o que bloqueia vários espaços entre as barras, mas não
+  o caminho com ponto. A PoC ainda redireciona com `/./\evil.com` e
+  `/./../../\evil.com`. A correção oficial trata também esse caso. A resposta do
+  modelo começa com "Análise da Vulnerabilidade (CVE-2020-11053 /
+  GHSA-j7px-6hwj-hp4g)": sem o identificador no prompt, ele reconheceu o código e
+  aplicou a correção de um CVE anterior do mesmo trecho. É um indício de
+  correção memorizada, e não de análise do código.
+- **CVE-2025-24976 (`regressao_funcional`):** `TestTokenVerify` e `TestLeeway`
+  passaram a falhar com "untrusted JWK with no certificate chain". O patch
+  rejeita chaves JWK sem cadeia de certificados, que o comportamento esperado
+  aceita.
+
+**Pendências:** revisão manual dos 8 casos `aprovado_automatico` dos modelos.
+Esta rodada tem 1 caso por família e serve para validar o processo; os números
+não permitem comparar os modelos.

@@ -8,8 +8,8 @@ Cria:
     prompts/<CVE>.txt              o prompt de cada caso
     respostas/<modelo>/<CVE>.md    um arquivo vazio por caso e por modelo de --modelos
 
-Para cada caso, copie o prompt, cole no chat do modelo (de preferência numa
-conversa nova) e cole o conteúdo do <CVE>.txt que o modelo criar (seção
+Para cada caso, envie o prompt ao modelo (via Claude Code ou Antigravity CLI,
+numa conversa nova) e cole o conteúdo do resposta.txt que o modelo criar (seção
 "Entrega" do prompt) no respostas/<modelo>/<CVE>.md correspondente. Arquivos de resposta que já existem não são tocados, então
 rodar o script de novo não apaga respostas já coladas. Depois rode
 scripts/montar_patches.py para gerar o JSON que o pipeline (pasta pipeline/) lê.
@@ -24,11 +24,7 @@ MODELO_PROMPT = """Você é um engenheiro de segurança especializado em Go. Sua
 corrigir uma vulnerabilidade de segurança em um projeto de código aberto real.
 
 ## Vulnerabilidade
-- CVE: {cve}
-- Descrição: {descricao}
-
-## Fraqueza (CWE)
-{cwes}
+{descricao}
 
 ## Código vulnerável
 Repositório: {repo}
@@ -55,20 +51,21 @@ acima, cada um com a função corrigida completa (mais eventuais funções auxil
 ```
 
 ## Entrega
-Crie um arquivo de texto chamado `{cve}.txt` com a sua resposta completa: a \
+Crie um arquivo de texto chamado `resposta.txt` com a sua resposta completa: a \
 análise e o(s) bloco(s) de código Go, mantendo as marcações ```go de cada bloco.
 """
 
 
 def montar(caso):
-    cwes = "\n".join(f"- {cid}: {info.get('name', '')}\n  {info.get('description', '')}"
-                     for cid, info in caso["cwe_info"].items())
+    # O prompt não traz o identificador do CVE nem as CWEs: com eles, o modelo
+    # poderia reconhecer a vulnerabilidade (ou lembrar a correção publicada) em
+    # vez de analisar o código. Fica só a descrição da falha.
     funcoes = "\n\n".join(
         f"### Função {i} — arquivo `{f['file_path']}`, linhas {f['start_line']}-{f['end_line']}\n"
         f"```go\n{f['snippet'].rstrip()}\n```"
         for i, f in enumerate(caso["vul_func"], 1))
-    return MODELO_PROMPT.format(cve=caso["cve_id"], descricao=caso["cve_description"].strip(),
-                                cwes=cwes, repo=caso["repo"], funcoes=funcoes,
+    return MODELO_PROMPT.format(descricao=caso["cve_description"].strip(),
+                                repo=caso["repo"], funcoes=funcoes,
                                 n_blocos=len(caso["vul_func"]))
 
 

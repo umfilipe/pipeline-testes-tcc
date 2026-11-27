@@ -55,6 +55,15 @@ def _e_declaracao(bloco):
     return False
 
 
+# cabeçalho de função no início da linha: func (r *Tipo[T]) Nome( ou func Nome[T any](
+CABECALHO_FUNC = re.compile(r"^func\s*(?:\(\s*(?:\w+\s+)?\*?\s*(\w+)[^)]*\)\s*)?(\w+)\s*[\[(]", re.M)
+
+
+def _funcoes_declaradas(codigo):
+    """Conjunto de (tipo do receptor ou "", nome) das funções declaradas no código."""
+    return {(m.group(1) or "", m.group(2)) for m in CABECALHO_FUNC.finditer(codigo)}
+
+
 def extrair_funcoes(texto, n_funcoes, vulneraveis=()):
     """Extrai da resposta as funções corrigidas; devolve (lista de funções, erro).
 
@@ -63,6 +72,12 @@ def extrair_funcoes(texto, n_funcoes, vulneraveis=()):
         citam o original antes de mostrar a correção;
       - blocos que não são declarações completas (func/var/const/type): trechos
         soltos citados na explicação, como uma linha ou uma expressão.
+
+    Dos blocos restantes, cada função vulnerável recebe o último bloco que a
+    declara (mesmo nome e mesmo tipo de receptor); os demais, como structs do
+    arquivo citadas na análise, ficam de fora. Se alguma função não for
+    encontrada assim, vale a regra por posição: com uma função, todos os blocos
+    juntos; com mais, um bloco por função, na ordem.
     """
     originais = {_normalizar(v) for v in vulneraveis}
     blocos = [b.strip("\n") for b in BLOCO_GO.findall(texto)
@@ -72,6 +87,25 @@ def extrair_funcoes(texto, n_funcoes, vulneraveis=()):
         if bloco and n_funcoes == 1:
             return [bloco], None
         return None, "nenhum bloco de código encontrado na resposta"
+    # caminho preferido: para cada função vulnerável, o bloco que a declara (o
+    # prompt pede as auxiliares novas no mesmo bloco da função corrigida). Isso
+    # descarta blocos que só citam código existente na análise, como uma struct
+    # do arquivo, que viraria uma redeclaração no patch.
+    chaves = [_funcoes_declaradas(v) for v in vulneraveis]
+    if len(chaves) == n_funcoes and all(len(k) == 1 for k in chaves):
+        escolhidos = []
+        for (chave,) in chaves:
+            # o último bloco que declara a função: se o modelo mostrar mais de
+            # uma versão, a última é a final
+            candidatos = [b for b in blocos if chave in _funcoes_declaradas(b)]
+            if not candidatos:
+                break
+            escolhidos.append(candidatos[-1])
+        else:
+            if len(set(escolhidos)) == n_funcoes:
+                return escolhidos, None
+    # alternativa (função não encontrada pelo nome, ou várias no mesmo bloco):
+    # o comportamento anterior, por posição
     if n_funcoes == 1:
         # um único alvo: todos os blocos viram o substituto (função + auxiliares)
         return ["\n\n".join(blocos)], None
